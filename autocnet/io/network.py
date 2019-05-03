@@ -13,7 +13,8 @@ import autocnet
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
-        """If input object is an ndarray it will be converted into a dict
+        """
+        If input object is an ndarray it will be converted into a dict
         holding dtype, shape and the data, base64 encoded.
         """
         if isinstance(obj, np.ndarray):
@@ -75,6 +76,11 @@ def save(network, projectname):
                     ndarrays_to_write[k] = v
                     ndarrays_to_write[k+'_idx'] = v.index
                     ndarrays_to_write[k+'_columns'] = v.columns
+            # Handle DataFrames that are properties
+            for k in ['_matches', '_masks', '_costs']:
+                ndarrays_to_write[k] = getattr(data, k, np.array([]))
+                ndarrays_to_write['{}_idx'.format(k)] = getattr(data, k, pd.DataFrame()).index
+                ndarrays_to_write['{}_columns'.format(k)] = getattr(data, k, pd.DataFrame()).columns
             np.savez('{}_{}.npz'.format(s, d),**ndarrays_to_write)
             pzip.write('{}_{}.npz'.format(s, d))
             os.remove('{}_{}.npz'.format(s, d))
@@ -91,6 +97,14 @@ def json_numpy_obj_hook(dct):
     return dct
 
 def load(projectname):
+    """
+    Loads an autocnet project.
+
+    Parameters
+    ----------
+    projectname : str
+                  PATH to the file.
+    """
     with ZipFile(projectname, 'r') as pzip:
         # Read the graph object
         with pzip.open('graph.json', 'r') as g:
@@ -139,8 +153,10 @@ def load(projectname):
                 edge[k] = v
             try:
                 nzf = np.load(BytesIO(pzip.read('{}_{}.npz'.format(s,d))))
-                edge.masks = pd.DataFrame(nzf['masks'], index=nzf['masks_idx'], columns=nzf['masks_columns'])
-                edge.matches = pd.DataFrame(nzf['matches'], index=nzf['matches_idx'], columns=nzf['matches_columns'])
+                for j in ['_matches', '_masks', '_costs']:
+                    setattr(edge, j, pd.DataFrame(nzf[j], 
+                                                  index=nzf['{}_idx'.format(j)], 
+                                                  columns=nzf['{}_columns'.format(j)]))
             except:
                 pass
             # Add a mock edge

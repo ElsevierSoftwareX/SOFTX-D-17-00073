@@ -40,6 +40,14 @@ def geo_graph():
     return network.CandidateGraph.from_adjacency(adjacency, basepath=basepath)
 
 @pytest.fixture()
+def reduced_geo():
+    basepath = get_path('Apollo15')
+    a = 'AS15-M-0297_crop.cub'
+    b = 'AS15-M-0298_crop.cub'
+    adjacency = {a:[b], b:[a]}
+    return network.CandidateGraph.from_adjacency(adjacency, basepath=basepath)
+
+@pytest.fixture()
 def disconnected_graph():
     return network.CandidateGraph.from_adjacency(get_path('adjacency.json'))
 
@@ -105,14 +113,6 @@ def test_serials(geo_graph):
     for s in serials:
         assert s in geo_graph.serials().values()
 
-"""def test_fully_connected_components():
-    G = network.CandidateGraph()
-    G.add_edges_from([('A', 'B'), ('A', 'C'), ('B', 'C'), ('B', 'D'), ('A', 'E'), ('A', 'F'), ('E', 'F') ])
-    fc = G.compute_fully_connected_components()
-    truth = [['A', 'B', 'C'], ['A', 'E', 'F']]
-    sorted_fca = sorted(list(map(sorted, fc['A'])))
-    assert truth == sorted_fca"""
-
 def test_unique_fully_connected():
     G = network.CandidateGraph()
     G.add_edges_from([('A', 'B'), ('A', 'C'), ('B', 'C'), ('B', 'D'), ('A', 'E'), ('A', 'F'), ('E', 'F') ])
@@ -134,33 +134,29 @@ def test_from_adjacency():
         assert isinstance(e, edge.Edge)
         assert isinstance(g.nodes[s]['data'], node.Node)
 
-def test_add_node():
-    basepath = get_path('Apollo15')
-    a = 'AS15-M-0297_crop.cub'
-    b = 'AS15-M-0298_crop.cub'
-    c = 'AS15-M-0299_crop.cub'
-    adjacency = {a:[b],
-                 b:[a]}
-    g = network.CandidateGraph.from_adjacency(adjacency, basepath=basepath)
-
+def test_add_node(reduced_geo):
     # Test without "image_name" arg (networkx parent method)
-    g.add_node(2, data=node.Node(image_name=c,
+    c = 'AS15-M-0299_crop.cub'
+    basepath = get_path('Apollo15')
+    reduced_geo.add_node(2, data=node.Node(image_name=c,
                                     image_path=os.path.join(basepath, c),
                                     node_id=2))
-    assert len(g.nodes) == 3
-    assert g.node[2]["data"]["image_name"] == c
+    assert len(reduced_geo.nodes) == 3
+    assert reduced_geo.node[2]["data"]["image_name"] == c
 
+def test_add_node_by_name(reduced_geo):
     # Test with "image_name" (cg method)
-    g = network.CandidateGraph.from_adjacency(adjacency, basepath=basepath)
-    g.add_node(image_name=c, basepath=basepath)
-    assert len(g.nodes) == 3
-    assert g.node[2]["data"]["image_name"] == c
-    assert g.node[0].keys() == g.node[1].keys() == g.node[2].keys()
+    c = 'AS15-M-0299_crop.cub'
+    basepath = get_path('Apollo15')
+    reduced_geo.add_node(image_name=c, basepath=basepath)
+    assert len(reduced_geo.nodes) == 3
+    assert reduced_geo.node[2]["data"]["image_name"] == c
+    assert reduced_geo.node[0].keys() == reduced_geo.node[1].keys() == reduced_geo.node[2].keys()
 
+def test_add_node_nonexistent(geo_graph):
     # Test when "image_name" not found
-    node_len = len(g.nodes)
-    g.add_node(image_name="nonexistent.jpg")
-    assert len(g.nodes) == node_len
+    with pytest.warns(UserWarning):
+        geo_graph.add_node(image_name="nonexistent.jpg")
 
 def test_add_edge():
     basepath = get_path('Apollo15')
@@ -182,11 +178,11 @@ def test_add_edge():
     assert g.edges[1, 2]["data"].destination == g.node[2]["data"]
     assert g.edges[0, 1].keys() == g.edges[0, 2].keys() == g.edges[1, 2].keys()
 
-    # Test when adj img not found
-    g =  network.CandidateGraph.from_adjacency(adjacency, basepath=basepath)
-    edge_len = len(g.edges)
-    g.add_node(image_name=c, basepath=basepath, adjacency=["nonexistent.jpg"])
-    assert len(g.edges) == edge_len
+def test_add_edge_missing_img(reduced_geo):
+    c = 'AS15-M-0299_crop.cub'
+    basepath = get_path('Apollo15')
+    with pytest.warns(UserWarning):
+        reduced_geo.add_node(image_name=c, basepath=basepath, adjacency=["nonexistent.jpg"])
 
 def test_equal(candidategraph):
     cg = copy.deepcopy(candidategraph)
@@ -240,8 +236,11 @@ def test_filter(graph):
 
     test_sub_graph = graph.create_node_subgraph([0, 1])
 
-    test_sub_graph.extract_features(extractor_parameters={'nfeatures': 25})
-    test_sub_graph.match(k=2)
+    for n, d in test_sub_graph.nodes(data='data'):
+        d.descriptors = np.arange(10)
+
+    for u, v, e in test_sub_graph.edges(data='data'):
+        e.matches = pd.DataFrame(np.arange(9).reshape(3,3))
 
     filtered_nodes = graph.filter_nodes(lambda node: node.descriptors is not None)
     filtered_edges = graph.filter_edges(lambda edge: edge.matches.empty is not True)
@@ -261,9 +260,10 @@ def test_subset_graph(graph):
 
 def test_subgraph_from_matches(graph):
     test_sub_graph = graph.create_node_subgraph([0, 1])
-    test_sub_graph.extract_features(extractor_parameters={'nfeatures': 25})
-    test_sub_graph.match(k=2)
-
+    #test_sub_graph.extract_features(extractor_parameters={'nfeatures': 25})
+    #test_sub_graph.match(k=2)
+    for u, v, k in test_sub_graph.edges(data='data'):
+        k.matches = pd.DataFrame([1,2,3])
     sub_graph_from_matches = graph.subgraph_from_matches()
 
     assert test_sub_graph.edges() == sub_graph_from_matches.edges()
@@ -285,7 +285,7 @@ def test_minimum_spanning_tree():
     assert sorted(mst_graph.nodes()) == sorted(graph.nodes())
     assert len(mst_graph.edges()) == len(graph.edges())-5
 
-
+@pytest.mark.filterwarnings('ignore::UserWarning')
 def test_fromlist():
     mock_list = ['AS15-M-0295_SML.png', 'AS15-M-0296_SML.png', 'AS15-M-0297_SML.png',
                  'AS15-M-0298_SML.png', 'AS15-M-0299_SML.png', 'AS15-M-0300_SML.png']
@@ -318,63 +318,21 @@ def test_apply_func_to_edges(graph):
     except AttributeError:
         pass
 
-    graph.extract_features(extractor_parameters={'nfeatures': 50})
-    graph.match()
-    graph.apply_func_to_edges("symmetry_check")
+    return_value = pd.DataFrame(np.arange(36).reshape(6,6), columns=['a', 'b', 'c', 'source_idx', 'destination_idx', 'distance'])
+    with patch('autocnet.graph.edge.Edge.matches', new_callable=PropertyMock, return_value=return_value):
+        graph.apply_func_to_edges("symmetry_check")
 
-    # Test passing the func by signature
-    graph.apply_func_to_edges(graph[0][1]['data'].symmetry_check)
-    assert not graph[0][2]['data'].masks.symmetry.all()
-    #assert not mst_graph[0][1]['data'].masks.symmetry.all()
+        # Test passing the func by signature
+        graph.apply_func_to_edges(graph[0][1]['data'].symmetry_check)
+        assert not graph[0][2]['data'].masks.symmetry.all()
 
-
-'''def test_intersection():
-    # Generate the footprints for the mock nodes
-    ogr_poly_list = []
-    wkt0 = "MULTIPOLYGON (((2.5 7.5,7.5 7.5,7.5 12.5,2.5 12.5,2.5 7.5)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt0))
-    wkt1 = "MULTIPOLYGON (((0 10, 5 10, 5 15, 0 15, 0 10)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt1))
-    wkt2 = "MULTIPOLYGON (((5.5 5.0,10.5 5.0,10.5 10.0,5.5 10.0,5.5 5.0)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt2))
-    wkt3 = "MULTIPOLYGON (((5.5 7.5,10.5 7.5,10.5 12.5,5.5 12.5,5.5 7.5)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt3))
-    wkt4 = "MULTIPOLYGON (((8 11,13 11,13 16,8 16,8 11)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt4))
-    wkt5 = "MULTIPOLYGON (((8 14,13 14,13 19,8 19,8 14)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt5))
-    wkt6 = "MULTIPOLYGON (((11 11,16 11,16 16,11 16,11 11)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt6))
-    wkt7 = "MULTIPOLYGON (((11 14,16 14,16 19,11 19,11 14)))"
-    ogr_poly_list.append(ogr.CreateGeometryFromWkt(wkt7))
-
-    adj = {0: [1,2,3],
-           1: [0],
-           2: [0,3],
-           3: [0,2,4],
-           4: [3,5,7,6],
-           5: [4,6,7],
-           6: [4,5,7],
-           7: [4,5,6]}
-
-    cang = network.CandidateGraph.from_adjacency(adj)
-    i = 0
-    for d, node in cang.nodes.data('data'):
-        #print(node, type(node), dir(node), node.geodata, type(node.geodata))
-        node._geodata = MagicMock(spec=io_gdal.GeoDataset)
-        node._geodata.footprint = ogr_poly_list[i]
-        i += 1
-
-    overlap, intersect_gdf = cang.compute_intersection(3)
-
-    # Test the correct areas were found for the overlap and
-    # the intersect_gdf
-    assert intersect_gdf.geometry[0].area == 7.5
-    assert intersect_gdf.geometry[1].area == 5
-    assert intersect_gdf.geometry[2].area == 5
-    assert intersect_gdf.geometry[3].area == 3.75
-    assert overlap.geometry.area.values == 21.25'''
-
+def test_generate_control_network(candidategraph):
+    candidategraph.generate_control_network()
+    cn = candidategraph.controlnetwork
+    
+    # Confirm that points are being created with measures.
+    for i, g in cn.groupby('point_id'):
+        assert len(g) == 2
 
 def test_set_maxsize(graph):
     maxsizes = network.MAXSIZE
@@ -408,7 +366,7 @@ def test_get_matches(candidategraph):
 
 def test_apply(graph):
     def set_matches(e):
-        e.matches = ['fake', 'fake', 'fake']
+        e.matches = pd.DataFrame(['fake', 'fake', 'fake'])
 
     def get_matches(e):
         return e.matches

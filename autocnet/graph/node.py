@@ -3,11 +3,12 @@ import itertools
 import os
 import warnings
 
+from csmapi import csmapi
 import numpy as np
 import pandas as pd
 from plio.io.io_gdal import GeoDataset
 from plio.io.isis_serial_number import generate_serial_number
-from scipy.misc import bytescale, imresize
+from skimage.transform import resize
 from shapely.geometry import Polygon
 from shapely import wkt
 
@@ -15,10 +16,8 @@ from autocnet.cg import cg
 
 from autocnet.io import keypoints as io_keypoints
 
-from autocnet.matcher.add_depth import deepen_correspondences
 from autocnet.matcher import cpu_extractor as fe
 from autocnet.matcher import cpu_outlier_detector as od
-from autocnet.matcher import suppression_funcs as spf
 from autocnet.cg.cg import convex_hull_ratio
 
 from autocnet.vis.graph_view import plot_node
@@ -65,9 +64,37 @@ class Node(dict, MutableMapping):
         self['image_path'] = image_path
         self['node_id'] = node_id
         self['hash'] = image_name
-        self.descriptors = None
-        self.keypoints = pd.DataFrame()
         self.masks = pd.DataFrame()
+
+    @property
+    def camera(self):
+        if not hasattr(self, '_camera'):
+            self._camera = None
+        return self._camera
+    
+    @camera.setter
+    def camera(self, camera):
+        self._camera = camera
+
+    @property
+    def descriptors(self):
+        if not hasattr(self, '_descriptors'):
+            self._descriptors = None
+        return self._descriptors
+
+    @descriptors.setter
+    def descriptors(self, desc):
+        self._descriptors = desc
+
+    @property
+    def keypoints(self):
+        if not hasattr(self, '_keypoints'):
+            self._keypoints = pd.DataFrame()
+        return self._keypoints
+
+    @keypoints.setter
+    def keypoints(self, kps):
+        self._keypoints = kps
 
     def __repr__(self):
         return """
@@ -158,7 +185,10 @@ class Node(dict, MutableMapping):
 
     @property
     def nkeypoints(self):
-        return len(self.keypoints)
+        try:
+            return len(self.keypoints)
+        except:
+            return 0
 
     def coverage(self):
         """
@@ -180,7 +210,7 @@ class Node(dict, MutableMapping):
 
         max_x = self.geodata.raster_size[0]
         max_y = self.geodata.raster_size[1]
-
+        print(max_x, max_y)
         total_area = max_x * max_y
 
         return hull_area / total_area
@@ -196,7 +226,7 @@ class Node(dict, MutableMapping):
         """
 
         array = self.geodata.read_array(band=band)
-        return bytescale(array)
+        return utils.bytescale(array)
 
     def get_array(self, band=1, **kwargs):
         """
@@ -253,8 +283,7 @@ class Node(dict, MutableMapping):
             keypoints = self.keypoints.loc[index][['x', 'y']]
 
         if homogeneous:
-            keypoints['homogeneous'] = 1
-
+            keypoints = keypoints.assign(homogeneous = 1)
         return keypoints
 
     def get_raw_keypoint_coordinates(self, index=slice(None)):
@@ -285,36 +314,37 @@ class Node(dict, MutableMapping):
         """
         pass
 
-    def extract_features(self, array, xystart=[], *args, **kwargs):
-        arraysize = array.shape[0] * array.shape[1]
+    def extract_features(self, array, xystart=[], camera=None, *args, **kwargs):
 
-        try:
-            maxsize = self.maxsize[0] * self.maxsize[1]
-        except:
-            maxsize = np.inf
-
-        if arraysize > maxsize:
-            warnings.warn('Node: {}. Maximum feature extraction array size is {}.  Maximum array size is {}. Please use tiling or downsampling.'.format(self['node_id'], maxsize, arraysize))
-
-        keypoints, descriptors = Node._extract_features(array, *args, **kwargs)
+        new_keypoints, new_descriptors = Node._extract_features(array, *args, **kwargs)
         count = len(self.keypoints)
 
+        # If this is a tile, push the keypoints to the correct start xy
         if xystart:
-            keypoints['x'] += xystart[0]
-            keypoints['y'] += xystart[1]
+            new_keypoints['x'] += xystart[0]
+            new_keypoints['y'] += xystart[1]
 
-        self.keypoints = pd.concat((self.keypoints, keypoints))
-        descriptor_mask = self.keypoints.duplicated()[count:]
-        number_new = descriptor_mask.sum()
-
+        concat_kps = pd.concat((self.keypoints, new_keypoints))
+        concat_kps.reset_index(inplace=True, drop=True)
+        concat_kps.drop_duplicates(inplace=True)
         # Removed duplicated and re-index the merged keypoints
-        self.keypoints.drop_duplicates(inplace=True)
-        self.keypoints.reset_index(inplace=True, drop=True)
 
+        # Update the descriptors to be the same size as the keypoints, maintaining alignment        
         if self.descriptors is not None:
-            self.descriptors = np.concatenate((self.descriptors, descriptors[~descriptor_mask]))
+            concat = np.concatenate((self.descriptors, new_descriptors))
         else:
-            self.descriptors = descriptors
+            concat = new_descriptors
+        new_descriptors = concat[concat_kps.index.values]
+        
+        self.descriptors = new_descriptors
+        self.keypoints = concat_kps.reset_index(drop=True)
+        
+        lkps = len(self.keypoints)
+
+        assert lkps == len(self.descriptors)
+
+        if lkps > 0:
+            return True
 
     def extract_features_from_overlaps(self, overlaps=[], downsampling=False, tiling=False, *args, **kwargs):
         # iterate through the overlaps
@@ -323,8 +353,7 @@ class Node(dict, MutableMapping):
         pass
 
     def extract_features_with_downsampling(self, downsample_amount,
-                                           array_read_args={},
-                                           interp='lanczos', *args, **kwargs):
+                                           array_read_args={}, *args, **kwargs):
         """
         Extract interest points for the this node (image) by first downsampling,
         then applying the extractor, and then upsampling the results backin to
@@ -339,49 +368,46 @@ class Node(dict, MutableMapping):
         total_size = array_size[0] * array_size[1]
         shape = (int(array_size[0] / downsample_amount),
                  int(array_size[1] / downsample_amount))
-        array = imresize(self.geodata.read_array(**array_read_args), shape, interp=interp)
+        array = resize(self.geodata.read_array(**array_read_args), shape, preserve_range=True)
         self.extract_features(array, *args, **kwargs)
+
         self.keypoints['x'] *= downsample_amount
         self.keypoints['y'] *= downsample_amount
 
+        if len(self.keypoints) > 0:
+            return True
+
     def extract_features_with_tiling(self, tilesize=1000, overlap=500, *args, **kwargs):
         array_size = self.geodata.raster_size
-        stepsize = tilesize - overlap
-        if stepsize < 0:
-            raise ValueError('Overlap can not be greater than tilesize.')
-        # Compute the tiles
-        if tilesize >= array_size[1]:
-            ytiles = [(0, array_size[1])]
-        else:
-            ystarts = range(0, array_size[1], stepsize)
-            ystops = range(tilesize, array_size[1], stepsize)
-            ytiles = list(zip(ystarts, ystops))
-            ytiles.append((ytiles[-1][0] + stepsize, array_size[1]))
-
-        if tilesize >= array_size[0]:
-            xtiles = [(0, array_size[0])]
-        else:
-            xstarts = range(0, array_size[0], stepsize)
-            xstops = range(tilesize, array_size[0], stepsize)
-            xtiles = list(zip(xstarts, xstops))
-            xtiles.append((xtiles[-1][0] + stepsize, array_size[0]))
-        tiles = itertools.product(xtiles, ytiles)
-
-        for tile in tiles:
-            # xstart, ystart, xcount, ycount
-            xstart = tile[0][0]
-            ystart = tile[1][0]
-            xstop = tile[0][1]
-            ystop = tile[1][1]
-            pixels = [xstart, ystart,
-                      xstop - xstart,
-                      ystop - ystart]
-
-            array = self.geodata.read_array(pixels=pixels)
-            xystart = [xstart, ystart]
+        slices = utils.tile(array_size, tilesize=tilesize, overlap=overlap)
+        for s in slices:
+            xystart = [s[0], s[1]]
+            array = self.geodata.read_array(pixels=s)
             self.extract_features(array, xystart, *args, **kwargs)
 
-    def load_features(self, in_path, format='npy'):
+        if len(self.keypoints) > 0:
+            return True
+
+    def project_keypoints(self):   
+        if self.camera is None:
+            # Without a camera, it is not possible to project
+            warnings.warn('Unable to project points, no camera available.')
+            return False
+        # Project the sift keypoints to the ground
+        def func(row, args):
+            camera = args[0]
+            imagecoord = csmapi.ImageCoord(float(row[1]), float(row[0]))
+            # An elevation at the ellipsoid is plenty accurate for this work
+            gnd = getattr(camera, 'imageToGround')(imagecoord, 0)
+            return [gnd.x, gnd.y, gnd.z]
+        feats = self.keypoints[['x', 'y']].values
+        gnd = np.apply_along_axis(func, 1, feats, args=(self.camera, ))
+        gnd = pd.DataFrame(gnd, columns=['xm', 'ym', 'zm'], index=self.keypoints.index)
+        self.keypoints = pd.concat([self.keypoints, gnd], axis=1)
+
+        return True
+
+    def load_features(self, in_path, format='npy', **kwargs):
         """
         Load keypoints and descriptors for the given image
         from a HDF file.
@@ -392,12 +418,12 @@ class Node(dict, MutableMapping):
                   PATH to the hdf file or a HDFDataset object handle
 
         format : {'npy', 'hdf'}
+                 The format that the features are stored in.  Default: npy.
         """
         if format == 'npy':
             keypoints, descriptors = io_keypoints.from_npy(in_path)
         elif format == 'hdf':
-            keypoints, descriptors = io_keypoints.from_hdf(in_path,
-                                                           key=self['image_name'])
+            keypoints, descriptors = io_keypoints.from_hdf(in_path, **kwargs)
 
         self.keypoints = keypoints
         self.descriptors = descriptors
@@ -467,4 +493,4 @@ class Node(dict, MutableMapping):
 
         for x, y in coords:
             reproj.append(self.geodata.latlon_to_pixel(y, x))
-        return Polygon(reproj)
+        return Polygon(reproj) 

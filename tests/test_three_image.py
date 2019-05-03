@@ -37,14 +37,14 @@ class TestThreeImageMatching(unittest.TestCase):
         # Step: Create an adjacency graph
         adjacency = get_path('three_image_adjacency.json')
         basepath = get_path('Apollo15')
-        cg = CandidateGraph.from_adjacency(adjacency, basepath)
+        cg = CandidateGraph.from_adjacency(adjacency, basepath=basepath)
         self.assertEqual(3, cg.number_of_nodes())
         self.assertEqual(3, cg.number_of_edges())
 
         # Step: Extract image data and attribute nodes
-        cg.extract_features(extractor_parameters={'nfeatures':500})
+        cg.extract_features(extractor_method='vlfeat')
         for i, node, in cg.nodes_iter(data=True):
-            self.assertIn(node.nkeypoints, range(490, 511))
+            self.assertIn(node.nkeypoints, range(5800, 6000))
 
         cg.match(k=2)
         cg.symmetry_checks()

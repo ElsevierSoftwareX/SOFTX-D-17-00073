@@ -1,5 +1,6 @@
 import os
-import unittest
+
+import pytest
 
 from plio.io.io_controlnetwork import to_isis
 from plio.io.io_controlnetwork import write_filelist
@@ -12,7 +13,7 @@ import pandas as pd
 import numpy as np
 
 
-class TestTwoImageMatching(unittest.TestCase):
+class TestTwoImageMatching():
     """
     Feature: As a user
         I wish to automatically match two images to
@@ -39,42 +40,42 @@ class TestTwoImageMatching(unittest.TestCase):
         for k, v in self.serial_numbers.items():
             self.serial_numbers[k] = 'APOLLO15/METRIC/{}'.format(v)
 
+    @pytest.mark.filterwarnings('ignore::UserWarning')
+    @pytest.mark.filterwarnings('ignore::RuntimeWarning')
     def test_two_image(self):
         # Step: Create an adjacency graph
         adjacency = get_path('two_image_adjacency.json')
         basepath = get_path('Apollo15')
         cg = CandidateGraph.from_adjacency(adjacency, basepath=basepath)
-        self.assertEqual(2, cg.number_of_nodes())
-        self.assertEqual(1, cg.number_of_edges())
+        assert 2 == cg.number_of_nodes()
+        assert 1 == cg.number_of_edges()
 
         # Step: Extract image data and attribute nodes
-        cg.extract_features(extractor_method='sift', extractor_parameters={"nfeatures":500})
+        cg.extract_features(extractor_method='vlfeat', extractor_parameters={"nfeatures":500})
         for i, node in cg.nodes.data('data'):
-            self.assertIn(node.nkeypoints, range(490, 510))
+            assert node.nkeypoints in range(5800, 6000)
 
         # Step: Compute the coverage ratios
         for i, node in cg.nodes.data('data'):
             ratio = node.coverage()
-            self.assertTrue(0.93 < round(ratio, 8) < 0.96)
-
+            assert 0.98 < round(ratio, 8) < 0.99
+        
         cg.decompose_and_match(k=2, maxiteration=2)
-        self.assertTrue(isinstance(cg.edges[0,1]['data'].smembership, np.ndarray))
+        assert isinstance(cg.edges[0,1]['data'].smembership, np.ndarray)
 
         # Create fundamental matrix
         cg.compute_fundamental_matrices()
 
         for s, d, e in cg.edges.data('data'):
-            assert isinstance(e['fundamental_matrix'], np.ndarray)
-            err = e.compute_fundamental_error(clean_keys=['fundamental'])
-            assert isinstance(err, pd.Series)
+            assert isinstance(e.fundamental_matrix, np.ndarray)
+            e.compute_fundamental_error(clean_keys=['fundamental'])
+            assert 'fundamental_equality' in e.costs.columns
             matches, _ = e.clean(clean_keys=['fundamental'])
-            assert matches.index.all() == err.index.all()
 
         # Apply AMNS
-        cg.suppress(k=30, suppression_func=error)
+        cg.suppress(k=30, xkey='x', ykey='y', suppression_func=error)
 
         # Step: Compute subpixel offsets for candidate points
-        cg.subpixel_register(clean_keys=['suppression'], tiled=True)
         cg.subpixel_register(clean_keys=['suppression'])
 
     def tearDown(self):

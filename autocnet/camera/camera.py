@@ -1,9 +1,7 @@
 import numpy as np
 from autocnet.camera.utils import crossform
-try:
-    import cv2
-except:
-    cv2 = None
+import cv2
+
 
 
 def compute_epipoles(f):
@@ -38,13 +36,13 @@ def idealized_camera():
      : ndarray
        (3,4) with diagonal 1
     """
-    return np.eye(3, 4)
+    i = np.eye(3, 4)
+    i[:,-1] = 0
+    return i
 
-
-def estimated_camera_from_f(f):
+def camera_from_f(F):
     """
     Estimate a camera matrix using a fundamental matrix.
-
 
     Parameters
     ----------
@@ -57,9 +55,9 @@ def estimated_camera_from_f(f):
          Estimated camera matrix
     """
 
-    e, e1 = compute_epipoles(f)
+    e, e1 = compute_epipoles(F)
     p1 = np.empty((3, 4))
-    p1[:, :3] = e1.dot(f)
+    p1[:, :3] = -e1.dot(F)
     p1[:, 3] = e
 
     return p1
@@ -103,29 +101,11 @@ def triangulate(pt, pt1, p, p1):
         pt = pt.T
     if pt1.shape[0] != 3:
         pt1 = pt1.T
-    #if cv2:
+
     X = cv2.triangulatePoints(p, p1, pt[:2], pt1[:2])
     X /= X[3] # Homogenize
     return X
-    """
-    # Stubbed in for a ticket addressing making OpenCV an optional dependency
-    else:
-        npts = len(pt)
-        a = np.zeros((4, 4))
-        coords = np.empty((npts, 4))
-        coords[:] = 1
-        for i in range(npts):
-            # Compute AX = 0
-            a[0] = pt[i][0] * p[2] - p[0]
-            a[1] = pt[i][1] * p[2] - p[1]
-            a[2] = pt1[i][0] * p1[2] - p1[0]
-            a[3] = pt1[i][1] * p1[2] - p1[1]
-            # v.T is a least squares solution that minimizes the error residual
-            u, s, vh = np.linalg.svd(a)
-            v = vh.T
-            coords[i] = v[:,3] / (v[:,3][-1])
-        return coords.T
-    """
+
 def projection_error(p1, p, pt, pt1):
     """
     Based on Hartley and Zisserman p.285 this function triangulates

@@ -13,6 +13,15 @@ except Exception:  # pragma: no cover
     vlfeat = False
     pass
 
+try:
+    from cv2 import xfeatures2d
+    SIFT = xfeatures2d.SIFT_create
+    SURF = xfeatures2d.SURF_create
+except Exception:  # pragma: no cover
+    SIFT = None
+    SURF = None
+    pass
+
 
 def extract_features(array, extractor_method='sift', extractor_parameters={}):
     """
@@ -41,8 +50,8 @@ def extract_features(array, extractor_method='sift', extractor_parameters={}):
                   Of descriptors
     """
     detectors = {'fast': cv2.FastFeatureDetector_create,
-                 'sift': cv2.xfeatures2d.SIFT_create,
-                 'surf': cv2.xfeatures2d.SURF_create,
+                 'sift': SIFT,
+                 'surf': SURF,
                  'orb': cv2.ORB_create}
 
     if extractor_method == 'vlfeat' and vlfeat != True:

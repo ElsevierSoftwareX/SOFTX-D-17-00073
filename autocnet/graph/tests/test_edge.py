@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import Mock, MagicMock
+import pytest
 
 import ogr
 import numpy as np
@@ -195,8 +196,6 @@ class TestEdge(unittest.TestCase):
 
         # Assert masked dst keypt coords are equal
         d_expected = pd.DataFrame({'x': (33, 32, 31), 'y': (28, 27, 26)})
-        print(d_expected['x'])
-        print(d_overlap['x'].values)
         self.assertTrue(np.array_equal(d_expected['x'], d_overlap['x'].values))
         self.assertTrue(np.array_equal(d_expected['y'], d_overlap['y'].values))
 
@@ -257,6 +256,7 @@ class TestEdge(unittest.TestCase):
 
         self.assertEqual(expected, e.__repr__())
 
+    @pytest.mark.filterwarnings('ignore::UserWarning')
     def test_ratio_check(self):
         """
         A pretty basic test that simply tests pass through from the edge to the
@@ -319,7 +319,8 @@ class TestEdge(unittest.TestCase):
 
         # Should fail if no src & dst mbrs on edge; Warns user & mask isn't
         # populated
-        e.overlap_check()
+        with pytest.warns(UserWarning):
+            e.overlap_check()
         self.assertTrue("overlap" not in e.masks)
 
         # Should work after MBRs are set
@@ -329,3 +330,11 @@ class TestEdge(unittest.TestCase):
         overlap_matches, overlap_mask = e.clean(clean_keys=['overlap'])
         self.assertTrue(expected_mask.equals(overlap_mask))
         self.assertTrue(overlap_matches.equals(e.matches[overlap_mask]))
+
+    def test_bad_matches_type(self):
+        with self.assertRaises(TypeError):
+            s = node.Node(node_id=0)
+            d = node.Node(node_id=1)
+
+            e = edge.Edge(s, d)
+            e.matches = ['a', 'b', 'c']

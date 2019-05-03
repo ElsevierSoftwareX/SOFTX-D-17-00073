@@ -5,7 +5,7 @@ from bisect import bisect_left
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.misc import imresize
+from skimage.transform import rescale
 from scipy.ndimage.interpolation import rotate
 from scipy.ndimage.interpolation import zoom
 
@@ -93,7 +93,8 @@ def cifi(template, search_image, thresh=90, use_percentile=True,
     template_result = np.empty((len(scales), len(radii)))
 
     for i, s in enumerate(scales):
-        scaled_img = imresize(template, s)
+
+        scaled_img = rescale(template, s, preserve_range=True, multichannel=False)
         for j, r in enumerate(radii):
             # Handle case where image shape is too small
             try:
@@ -309,7 +310,7 @@ def rafi(template, search_image, candidate_pixels, best_scales, thresh=95,
 
         rad = radius if min(y, x) > radius else min(y, x)
         cropped_search = search_image[y-rad:y+rad+1, x-rad:x+rad+1]
-        scaled_img = imresize(cropped_search, best_scales[y, x])
+        scaled_img = rescale(cropped_search, best_scales[y, x], preserve_range=True, multichannel=False)
 
         # Will except if image size too small after scaling
         try:
@@ -505,7 +506,7 @@ def tefi(template, search_image, candidate_pixels, best_scales, best_angles,
 
         max_coeff = -math.inf
         for j in range(scalesxalphas.shape[0]):
-            transformed_template = imresize(u_template, scalesxalphas[j][0])
+            transformed_template = rescale(u_template, scalesxalphas[j][0],preserve_range=True, multichannel=False)
             transformed_template = rotate(transformed_template, scalesxalphas[j][1])
 
             y_window, x_window = (math.floor(transformed_template.shape[0]/2),
@@ -552,7 +553,7 @@ def tefi(template, search_image, candidate_pixels, best_scales, best_angles,
 
 
 def ciratefi(template, search_image, upsampling=1, cifi_thresh=95, rafi_thresh=95, tefi_thresh=100,
-             use_percentile=False, alpha=math.pi/16, scales=[0.5, 0.57, 0.66,  0.76, 0.87, 1.0],
+             use_percentile=True, alpha=math.pi/16, scales=[0.5, 0.57, 0.66,  0.76, 0.87, 1.0],
              radii=list(range(1, 12)), verbose=False):
     """
     Parameters

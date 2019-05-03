@@ -1,3 +1,4 @@
+import itertools
 import json
 
 from functools import reduce, singledispatch, update_wrapper
@@ -7,6 +8,41 @@ import pandas as pd
 import networkx as nx
 
 from osgeo import ogr
+
+def tile(array_size, tilesize=1000, overlap=500):
+    stepsize = tilesize - overlap
+    if stepsize < 0:
+        raise ValueError('Overlap can not be greater than tilesize.')
+    # Compute the tiles
+    if tilesize >= array_size[1]:
+        ytiles = [(0, array_size[1])]
+    else:
+        ystarts = range(0, array_size[1], stepsize)
+        ystops = range(tilesize, array_size[1], stepsize)
+        ytiles = list(zip(ystarts, ystops))
+        ytiles.append((ytiles[-1][0] + stepsize, array_size[1]))
+
+    if tilesize >= array_size[0]:
+        xtiles = [(0, array_size[0])]
+    else:
+        xstarts = range(0, array_size[0], stepsize)
+        xstops = range(tilesize, array_size[0], stepsize)
+        xtiles = list(zip(xstarts, xstops))
+        xtiles.append((xtiles[-1][0] + stepsize, array_size[0]))
+    tiles = itertools.product(xtiles, ytiles)
+
+    slices = []
+    for tile in tiles:
+        # xstart, ystart, xcount, ycount
+        xstart = tile[0][0]
+        ystart = tile[1][0]
+        xstop = tile[0][1]
+        ystop = tile[1][1]
+        pixels = [xstart, ystart,
+                  xstop - xstart,
+                  ystop - ystart]
+        slices.append(pixels)
+    return slices
 
 def compare_dicts(d, o):
     """
@@ -35,8 +71,9 @@ def compare_dicts(d, o):
     >>> compare_dicts(d,o)
     True
     """
-    if o.keys() != d.keys():
-        return False
+    for k in o.keys():
+        if k not in d.keys():
+            return False
     for k, v in d.items():
         if v is None and o[k] is not None:
             return False
@@ -44,7 +81,7 @@ def compare_dicts(d, o):
             if not v.equals(o[k]):
                 return False
         elif isinstance(v, np.ndarray):
-            if not v.all() == o[k].all():
+            if not np.allclose(v, o[k]):
                 return False
         else:
             if k == '_geodata':
@@ -88,8 +125,9 @@ def normalize_vector(line):
     Examples
     --------
     >>> x = np.array([3, 1, 2])
-    >>> normalize_vector(x)
-    array([ 0.80178373,  0.26726124,  0.53452248])
+    >>> nv = normalize_vector(x)
+    >>> print(np.round(nv, 6))  # For doc test float percision
+    [0.801784 0.267261 0.534522]
     """
     if isinstance(line, pd.DataFrame):
         line = line.values
@@ -457,3 +495,72 @@ def create_decorator(dec, **namespace):
                 return ret
         return wrapper
     return decorator
+
+def bytescale(data, cmin=None, cmax=None, high=255, low=0):
+    """
+    This is pulled directly from scipy.misc as they are deprecating bytescale.
+
+    Byte scales an array (image).
+    Byte scaling means converting the input image to uint8 dtype and scaling
+    the range to ``(low, high)`` (default 0-255).
+    If the input image already has dtype uint8, no scaling is done.
+    This function is only available if Python Imaging Library (PIL) is installed.
+    Parameters
+    ----------
+    data : ndarray
+        PIL image data array.
+    cmin : scalar, optional
+        Bias scaling of small values. Default is ``data.min()``.
+    cmax : scalar, optional
+        Bias scaling of large values. Default is ``data.max()``.
+    high : scalar, optional
+        Scale max value to `high`.  Default is 255.
+    low : scalar, optional
+        Scale min value to `low`.  Default is 0.
+    Returns
+    -------
+    img_array : uint8 ndarray
+        The byte-scaled array.
+    Examples
+    --------
+    >>> from scipy.misc import bytescale
+    >>> img = np.array([[ 91.06794177,   3.39058326,  84.4221549 ],
+    ...                 [ 73.88003259,  80.91433048,   4.88878881],
+    ...                 [ 51.53875334,  34.45808177,  27.5873488 ]])
+    >>> bytescale(img)
+    array([[255,   0, 236],
+           [205, 225,   4],
+           [140,  90,  70]], dtype=uint8)
+    >>> bytescale(img, high=200, low=100)
+    array([[200, 100, 192],
+           [180, 188, 102],
+           [155, 135, 128]], dtype=uint8)
+    >>> bytescale(img, cmin=0, cmax=255)
+    array([[91,  3, 84],
+           [74, 81,  5],
+           [52, 34, 28]], dtype=uint8)
+    """
+    if data.dtype == np.uint8:
+        return data
+
+    if high > 255:
+        raise ValueError("`high` should be less than or equal to 255.")
+    if low < 0:
+        raise ValueError("`low` should be greater than or equal to 0.")
+    if high < low:
+        raise ValueError("`high` should be greater than or equal to `low`.")
+
+    if cmin is None:
+        cmin = data.min()
+    if cmax is None:
+        cmax = data.max()
+
+    cscale = cmax - cmin
+    if cscale < 0:
+        raise ValueError("`cmax` should be larger than `cmin`.")
+    elif cscale == 0:
+        cscale = 1
+
+    scale = float(high - low) / cscale
+    bytedata = (data - cmin) * scale + low
+    return (bytedata.clip(low, high) + 0.5).astype(np.uint8)

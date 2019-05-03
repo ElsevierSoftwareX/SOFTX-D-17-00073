@@ -6,9 +6,6 @@ from autocnet.examples import available
 with open('README.rst', 'r') as f:
     long_description = f.read()
 
-
-VERSION = autocnet.__version__
-
 def setup_package():
     examples = set()
     for i in available():
@@ -23,7 +20,7 @@ def setup_package():
 
     setup(
         name = "autocnet",
-        version = VERSION,
+        version = '0.2.5',
         author = "Jay Laura",
         author_email = "jlaura@usgs.gov",
         description = ("I/O API to support planetary data formats."),
@@ -36,17 +33,19 @@ def setup_package():
         package_data={'autocnet' : list(examples)},
         zip_safe=False,
         install_requires=[
-            'pandas',
-            'pyyaml',
-            'plio',
-            'pillow',
-            'pysal',
-            'scipy',
-            'networkx',
-            'numexpr',
-            'dill',
-            'cython',
-            'matplotlib'],
+              'numpy',
+              'scipy',
+              'scikit-image',
+              'opencv',
+              'vlfeat',
+              'cyvlfeat',
+              'csmapi',
+              'networkx',
+              'pillow',
+              'plio',
+              'ncurses',
+              'geopandas',
+              'imageio'],
         classifiers=[
             "Development Status :: 3 - Alpha",
             "Topic :: Utilities",

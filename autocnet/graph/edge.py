@@ -14,13 +14,15 @@ from autocnet.utils import utils
 from autocnet.matcher import cpu_outlier_detector as od
 from autocnet.matcher import suppression_funcs as spf
 from autocnet.matcher import subpixel as sp
+from autocnet.matcher import cpu_ring_matcher
 from autocnet.transformation import fundamental_matrix as fm
 from autocnet.transformation import homography as hm
-from autocnet.vis.graph_view import plot_edge, plot_node, plot_edge_decomposition
+from autocnet.transformation import spatial
+from autocnet.vis.graph_view import plot_edge, plot_node, plot_edge_decomposition, plot_matches
 from autocnet.cg import cg
 
 from plio.io.io_gdal import GeoDataset
-
+from csmapi import csmapi
 
 class Edge(dict, MutableMapping):
     """
@@ -45,14 +47,14 @@ class Edge(dict, MutableMapping):
         self.destination = destination
         self['homography'] = None
         self['fundamental_matrix'] = None
-        self.matches = pd.DataFrame()
-        self.masks = pd.DataFrame()
         self.subpixel_matches = pd.DataFrame()
+        self._matches = pd.DataFrame()
         self['weights'] = {}
 
         self['source_mbr'] = None
         self['destin_mbr'] = None
         self['overlap_latlon_coords'] = None
+
 
     def __repr__(self):
         return """
@@ -61,9 +63,63 @@ class Edge(dict, MutableMapping):
         Available Masks: {}
         """.format(self.source, self.destination, self.masks)
 
+
     def __eq__(self, other):
         return utils.compare_dicts(self.__dict__, other.__dict__) *\
                utils.compare_dicts(self, other)
+
+
+    @property
+    def masks(self):
+        if not hasattr(self, '_masks'):
+            self._masks = pd.DataFrame()
+        return self._masks
+
+    @masks.setter
+    def masks(self, value):
+        if isinstance(value, pd.DataFrame):
+            self._masks = value
+        else:
+            raise(TypeError)
+
+    @property
+    def matches(self):
+        if not hasattr(self, '_matches'):
+            self._matches = pd.DataFrame()
+        return self._matches
+    
+    @matches.setter
+    def matches(self, value):
+        if isinstance(value, pd.DataFrame):
+            self._matches = value
+            # Ensure that the costs df remains in sync with the matches df
+            if not self.costs.index.equals(value.index):
+                self.costs = pd.DataFrame(index=value.index)
+        else:
+            raise(TypeError)
+    
+    @property
+    def costs(self):
+        if not hasattr(self, '_costs'):
+            self._costs = pd.DataFrame(index=self.matches.index)
+        return self._costs
+
+    @costs.setter
+    def costs(self, value):
+        if isinstance(value, pd.DataFrame):
+            self._costs = value
+        else:
+            raise(TypeError)
+
+    @property
+    def ring(self):
+        if not hasattr(self, '_ring'):
+            self._ring = None
+        return self._ring
+
+    @ring.setter
+    def ring(self, val):
+        self._ring = val
 
     def match(self, k=2, **kwargs):
 
@@ -100,6 +156,96 @@ class Edge(dict, MutableMapping):
             The number of neighbors to find
         """
         pass
+
+    def ring_match(self, *args, **kwargs):
+        ref_kps =  self.source.keypoints
+        ref_desc = self.source.descriptors
+        tar_kps = self.destination.keypoints
+        tar_desc = self.destination.descriptors
+
+        if not 'xm' in ref_kps.columns:
+            warnings.warn('To ring match body centered coordinates (xm, ym, zm) must be in the keypoints')
+            return
+        ref_feats = ref_kps[['x', 'y', 'xm', 'ym', 'zm']].values
+        tar_feats = tar_kps[['x', 'y', 'xm', 'ym', 'zm']].values
+
+        _, _, pidx, ring = cpu_ring_matcher.ring_match(ref_feats, tar_feats,
+                                                           ref_desc, tar_desc,
+                                                           *args, **kwargs)
+
+        if pidx is None:
+            return
+        self.ring = ring
+        pidx = cpu_ring_matcher.check_pidx_duplicates(pidx)
+
+        #Set the columns of the matches df
+        matches = np.empty((pidx.shape[0], 4))
+        matches[:,0] = self.source['node_id']
+        matches[:,1] = ref_kps.index[pidx[:,0]].values
+        matches[:,2] = self.destination['node_id']
+        matches[:,3] = tar_kps.index[pidx[:,1]].values
+
+        matches = pd.DataFrame(matches, columns=['source',
+                                                 'source_idx',
+                                                 'destination',
+                                                 'destination_idx']).astype(np.float32)
+        
+        matches = matches.drop_duplicates()
+
+        self.matches = matches
+
+    def add_coordinates_to_matches(self):
+        """
+        Add source and destination x/y columns to the matches dataframe. This
+        will add to the overall memory needed to store matches, but makes
+        access to x,y easier as a join on the keypoints is not requires.
+        """
+        skps = self.get_keypoints(self.source, index=self.matches.source_idx)
+        skps.reindex(self.matches['source_idx'])
+        self.matches['source_x'] = skps.values[:,0]
+        self.matches['source_y'] = skps.values[:,1]
+        dkps = self.get_keypoints(self.destination, index=self.matches.destination_idx)
+        dkps.reindex(self.matches['destination_idx'])
+        self.matches['destination_x'] = dkps.values[:,0]
+        self.matches['destination_y'] = dkps.values[:,1]
+        
+    def project_matches(self, semimajor, semiminor, on='source', srid=None):
+        """
+        Project matches.
+        """
+        try:
+            coords = self.matches[['{}_y'.format(on),'{}_x'.format(on)]].values
+        except:
+            self.add_coordinates_to_matches()
+            coords = self.matches[['{}_y'.format(on),'{}_x'.format(on)]].values
+
+        node = getattr(self, on)
+        camera = getattr(node, 'camera')
+        if camera is None:
+            warnings.warn('Unable to project matches without a sensor model.')
+            return
+        
+        matches = self.matches
+        
+        gnd = np.empty((len(coords), 3))
+        # Project the points to the surface and reproject into latlon space
+        for i in range(gnd.shape[0]):
+            ic = csmapi.ImageCoord(coords[i][0], coords[i][1])
+            ground = camera.imageToGround(ic, 0)
+            gnd[i] = [ground.x, ground.y, ground.z]
+        lon, lat, alt = spatial.reproject(gnd.T, semimajor, semiminor,
+                                    'geocent', 'latlon')
+        if srid:
+            geoms = []
+            for coord in zip(lon, lat, alt):
+                geoms.append('SRID={};POINTZ({} {} {})'.format(srid, coord[0],
+                                                                     coord[1],
+                                                                     coord[2]))
+            matches['geom'] = geoms
+        
+        matches['lat'] = lat
+        matches['lon'] = lon
+        self.matches = matches
 
     def decompose(self):
         """
@@ -140,6 +286,36 @@ class Edge(dict, MutableMapping):
         pass
         #return.masks[maskname] = od.distance_ratio(matches, **kwargs)
 
+    @utils.methodispatch
+    def get_keypoints(self, node, index=None, homogeneous=False, overlap=False):
+        if not hasattr(index, '__iter__') and index is not None:
+            raise TypeError
+        keypts = node.get_keypoint_coordinates(index=index, homogeneous=homogeneous)
+        # If the index is passed, the results are returned sorted. The index is not
+        # necessarily sorted, so 'unsort' so that the return order matches the passed
+        # order
+        if index is not None:
+            keypts = keypts.reindex(index)
+        # If we only want keypoints in the overlap
+        if overlap:
+            if self.source == node:
+                mbr = self['source_mbr']
+            else:
+                mbr = self['destin_mbr']
+            # Can't use overlap if we haven't computed MBRs
+            if mbr is None:
+                return keypts
+            return keypts.query('x >= {} and x <= {} and y >= {} and y <= {}'.format(*mbr))
+        return keypts
+
+    @get_keypoints.register(str)
+    def _(self, node, index=None, homogeneous=False, overlap=False):
+        if not hasattr(index, '__iter__') and index is not None:
+            raise TypeError
+        node = node.lower()
+        node = getattr(self, node)
+        return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
+   
     def compute_fundamental_matrix(self, clean_keys=[], maskname='fundamental', **kwargs):
         """
         Estimate the fundamental matrix (F) using the correspondences tagged to this
@@ -160,52 +336,19 @@ class Edge(dict, MutableMapping):
         autocnet.transformation.transformations.FundamentalMatrix
 
         """
-        matches, mask = self.clean(clean_keys)
+        _, mask = self.clean(clean_keys)
+        s_keypoints, d_keypoints = self.get_match_coordinates(clean_keys=clean_keys)
+        self.fundamental_matrix, fmask = fm.compute_fundamental_matrix(s_keypoints, d_keypoints, **kwargs)
+        
 
-        # TODO: Homogeneous is horribly inefficient here, use Numpy array notation
-        s_keypoints = self.get_keypoints('source', index=matches['source_idx'])
-        d_keypoints = self.get_keypoints('destination', index=matches['destination_idx'])
-
-
-        # Replace the index with the matches index.
-        s_keypoints.index = matches.index
-        d_keypoints.index = matches.index
-
-        self['fundamental_matrix'], fmask = fm.compute_fundamental_matrix(s_keypoints, d_keypoints, **kwargs)
-
-        if isinstance(self['fundamental_matrix'], np.ndarray):
+        if isinstance(self.fundamental_matrix, np.ndarray):
             # Convert the truncated RANSAC mask back into a full length mask
             mask[mask] = fmask
 
             # Set the initial state of the fundamental mask in the masks
             self.masks[maskname] = mask
 
-    @utils.methodispatch
-    def get_keypoints(self, node, index=None, homogeneous=False, overlap=False):
-        if not hasattr(index, '__iter__') and index is not None:
-            raise TypeError
-        keypts = node.get_keypoint_coordinates(index=index, homogeneous=homogeneous)
-        # If we only want keypoints in the overlap
-        if overlap:
-            if self.source == node:
-                mbr = self['source_mbr']
-            else:
-                mbr = self['destin_mbr']
-            # Can't use overlap if we haven't computed MBRs
-            if mbr is None:
-                return keypts
-            return keypts.query('x >= {} and x <= {} and y >= {} and y <= {}'.format(*mbr))
-        return keypts
-
-    @get_keypoints.register(str)
-    def _(self, node, index=None, homogeneous=False, overlap=False):
-        if not hasattr(index, '__iter__') and index is not None:
-            raise TypeError
-        node = node.lower()
-        node = getattr(self, node)
-        return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
-
-    def compute_fundamental_error(self, clean_keys=[]):
+    def compute_fundamental_error(self, method='equality', clean_keys=[]):
         """
         Given a fundamental matrix, compute the reprojective error between
         a two sets of keypoints.
@@ -221,17 +364,17 @@ class Edge(dict, MutableMapping):
         error : pd.Series
                 of reprojective error indexed to the matches data frame
         """
-        if self['fundamental_matrix'] is None:
+        if self.fundamental_matrix is None:
             warnings.warn('No fundamental matrix has been compute for this edge.')
-        matches, masks = self.clean(clean_keys)
 
-        source_kps = self.source.get_keypoint_coordinates(index=matches['source_idx'])
-        destination_kps = self.destination.get_keypoint_coordinates(index=matches['destination_idx'])
+        matches, mask = self.clean(clean_keys)
+        s_keypoints, d_keypoints = self.get_match_coordinates(clean_keys=clean_keys)
+        if method == 'equality':
+            error = fm.compute_fundamental_error(self.fundamental_matrix, s_keypoints, d_keypoints)
+        elif method == 'projection':
+            error = fm.compute_reprojection_error(self.fundamental_matrix, s_keypoints, d_keypoints)
 
-        error = fm.compute_fundamental_error(self['fundamental_matrix'], source_kps, destination_kps)
-
-        error = pd.Series(error, index=matches.index)
-        return error
+        self.costs.loc[mask, 'fundamental_{}'.format(method)] = error
 
     def compute_homography(self, method='ransac', clean_keys=[], pid=None, maskname='homography', **kwargs):
         """
@@ -263,9 +406,8 @@ class Edge(dict, MutableMapping):
         mask[mask] = hmask
         self.masks['homography'] = mask
 
-    def subpixel_register(self, clean_keys=[], threshold=0.8,
-                          template_size=19, search_size=53, max_x_shift=1.0,
-                          max_y_shift=1.0, tiled=False, **kwargs):
+    def subpixel_register(self, method='phase', clean_keys=[],
+                          template_size=251, search_size=251, **kwargs):
         """
         For the entire graph, compute the subpixel offsets using pattern-matching and add the result
         as an attribute to each edge of the graph.
@@ -286,72 +428,77 @@ class Edge(dict, MutableMapping):
                      for subpixel accuracy
 
         template_size : int
-                        The size of the template in pixels, must be odd
+                        The size of the template in pixels, must be odd. If using phase, 
+                        only the template size is used.
 
         search_size : int
-                      The size of the search
+                      The size of the search area. When method='template', this size should
+                      be >= the template size
 
-        max_x_shift : float
-                      The maximum (positive) value that a pixel can shift in the x direction
-                      without being considered an outlier
-
-        max_y_shift : float
-                      The maximum (positive) value that a pixel can shift in the y direction
-                      without being considered an outlier
         """
-        for column, default in {'x_offset': 0, 'y_offset': 0, 'correlation': 0, 'reference': -1}.items():
-            if column not in self.subpixel_matches.columns:
-                self.subpixel_matches[column] = default
-
         # Build up a composite mask from all of the user specified masks
         matches, mask = self.clean(clean_keys)
 
-        # Grab the full images, or handles
-        if tiled is True:
-            s_img = self.source.geodata
-            d_img = self.destination.geodata
-        else:
-            s_img = self.source.geodata.read_array()
-            d_img = self.destination.geodata.read_array()
+        # Get the img handles
+        s_img = self.source.geodata
+        d_img = self.destination.geodata
 
-        source_image = (matches.iloc[0]['source_image'])
+        # Determine which algorithm is going ot be used.
+        if method == 'phase':
+            func = sp.iterative_phase
+            nstrengths = 2
+        elif method == 'template':
+            func = sp.subpixel_template
+            nstrengths = 1
+        shifts_x, shifts_y, strengths, new_x, new_y = sp._prep_subpixel(len(matches), nstrengths)
 
-        pts = []
         # for each edge, calculate this for each keypoint pair
         for i, (idx, row) in enumerate(matches.iterrows()):
             s_idx = int(row['source_idx'])
             d_idx = int(row['destination_idx'])
 
-            s_keypoint = self.source.get_keypoint_coordinates(s_idx)
-            d_keypoint = self.destination.get_keypoint_coordinates(d_idx)
+            if 'source_x' in row.index:
+                sx = row.source_x
+                sy = row.source_y
+            else:
+                s_keypoint = self.source.get_keypoint_coordinates([s_idx])
+                sx = s_keypoint.x
+                sy = s_keypoint.y
+    
+            if 'destination_x' in row.index:
+                dx = row.destination_x
+                dy = row.destination_y
+            else:
+                d_keypoint = self.destination.get_keypoint_coordinates([d_idx])
+                dx = d_keypoint.x
+                dy = d_keypoint.y
 
-            # Get the template and search window
-            s_template = sp.clip_roi(s_img, s_keypoint, template_size)
-            d_search = sp.clip_roi(d_img, d_keypoint, search_size)
-            if 0 in s_template.shape or 0 in d_search.shape:
-                continue
-            try:
-                (x_offset, y_offset, strength),ref = sp.subpixel_offset(s_template, d_search, **kwargs)
-                self.subpixel_matches.loc[idx, ('x_offset', 'y_offset', 'correlation', 'reference')]= [x_offset, y_offset, strength, source_image]
-                pts.append([s_template, d_search, ref, x_offset, y_offset])
-            except:
-                warnings.warn('Template-Search size mismatch, failing for this correspondence point.')
+            if method == 'phase':
+                res = sp.iterative_phase(sx, sy, dx, dy, s_img, d_img, size=template_size, **kwargs)
+                if res[0]:
+                    new_x[i] = res[0]
+                    new_y[i] = res[1]
+                    strengths[i] = res[2]
+            elif method == 'template':
+                new_x[i], new_y[i], strengths[i] = sp.subpixel_template(sx, sy, dx, dy, s_img, d_img,
+                                                                     search_size=search_size, 
+                                                                     template_size=template_size, **kwargs)
 
-        # Compute the mask for correlations less than the threshold
-        threshold_mask = self.subpixel_matches['correlation'] >= threshold
+            # Capture the shifts
+            shifts_x[i] = new_x[i] - dx
+            shifts_y[i] = new_y[i] - dy
 
-        # Compute the mask for the point shifts that are too large
-        query_string = 'x_offset <= -{0} or x_offset >= {0} or y_offset <= -{1} or y_offset >= {1}'.format(max_x_shift,max_y_shift)
-        sp_shift_outliers = self.subpixel_matches.query(query_string)
-        shift_mask = pd.Series(True, index=self.subpixel_matches.index)
-        shift_mask.loc[sp_shift_outliers.index] = False
+        self.matches.loc[mask, 'shift_x'] = shifts_x
+        self.matches.loc[mask, 'shift_y'] = shifts_y
+        self.matches.loc[mask, 'destination_x'] = new_x
+        self.matches.loc[mask, 'destination_y'] = new_y
 
-        # Generate the composite mask and write the masks to the mask data structure
-        mask = threshold_mask & shift_mask
-        self.masks['shift'] = shift_mask
-        self.masks['threshold'] = threshold_mask
-        self.masks['subpixel'] = mask
-        return pts
+        if method == 'phase':
+            self.costs.loc[mask, 'phase_diff'] = strengths[:,0]
+            self.costs.loc[mask, 'rmse'] = strengths[:,1]
+        elif method == 'template':
+            self.costs.loc[mask, 'correlation'] = strengths[:,0]
+ 
 
     def suppress(self, suppression_func=spf.correlation, clean_keys=[], maskname='suppression', **kwargs):
         """
@@ -377,8 +524,8 @@ class Edge(dict, MutableMapping):
             raise AttributeError('This edge does not yet have any matches computed.')
 
         matches, mask = self.clean(clean_keys)
-        domain = self.source.geodata.raster_size
-
+        rs = self.source.geodata.raster_size
+        domain = [0, 0, rs[0], rs[1]]
         # Massage the dataframe into the correct structure
         coords = self.source.get_keypoint_coordinates()
         merged = matches.merge(coords, left_on=['source_idx'], right_index=True)
@@ -393,6 +540,12 @@ class Edge(dict, MutableMapping):
         matches, mask = self.clean(clean_keys=clean_keys)
         indices = pd.Index(matches['source_idx'].values)
         return plot_node(self.source, index_mask=indices, **kwargs)
+
+    def plot_matches(self, clean_keys=[], **kwargs):  # pragme: no cover
+        matches, mask = self.clean(clean_keys=clean_keys)
+        sourcegd = self.source.geodata
+        destingd = self.destination.geodata
+        return plot_matches(matches, sourcegd, destingd, **kwargs)
 
     def plot_destination(self, ax=None, clean_keys=[], **kwargs):  # pragma: no cover
         matches, mask = self.clean(clean_keys=clean_keys)
@@ -439,7 +592,8 @@ class Edge(dict, MutableMapping):
         else:
             mask = pd.Series(True, self.matches.index)
 
-        return self.matches[mask], mask
+        m = mask[mask==True]
+        return self.matches.loc[m.index], mask
 
     def overlap(self):
         """
@@ -540,17 +694,18 @@ class Edge(dict, MutableMapping):
         self['source_mbr'] = smbr
         self['destin_mbr'] = dmbr
 
+    def get_match_coordinates(self, clean_keys=[]):
+        matches = self.get_matches(clean_keys=clean_keys)
+        skps = matches[['source_x', 'source_y']].astype(np.float)
+        dkps = matches[['destination_x', 'destination_y']].astype(np.float)
+
+        return skps, dkps
+
     def get_matches(self, clean_keys=[]): # pragma: no cover
         if self.matches.empty:
             return pd.DataFrame()
-
-        match, _ = self.clean(clean_keys=clean_keys)
-        match = match[['source_image', 'source_idx',
-                       'destination_image', 'destination_idx']]
-        skps = self.get_keypoints('source', index=match.source_idx)
-        skps.columns = ['source_x', 'source_y']
-        dkps = self.get_keypoints('destination', index=match.destination_idx)
-        dkps.columns = ['destination_x', 'destination_y']
-        match = match.join(skps, on='source_idx')
-        match = match.join(dkps, on='destination_idx')
-        return match
+        self.add_coordinates_to_matches()
+        matches, _ = self.clean(clean_keys=clean_keys)
+        skps = matches[['source_x', 'source_y']]
+        dkps = matches[['destination_x', 'destination_y']]
+        return matches

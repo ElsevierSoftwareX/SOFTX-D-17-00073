@@ -3,11 +3,7 @@ sudo: false
 
 branches:
 only:
-  - master
-
-env:
-  global:
-    - BINSTAR_USER: jlaura
+  - dev
 
 os:
   - linux
@@ -16,6 +12,7 @@ os:
 env:
   - PYTHON_VERSION=3.5
   - PYTHON_VERSION=3.6
+  - PYTHON_VERSION=3.7
 
 before_install:
   # We do this conditionally because it saves us some downloading if the
@@ -37,20 +34,11 @@ before_install:
   - source activate test
 
   # Install dependencies
-  - conda config --add channels conda-forge
   - conda config --add channels menpo
   - conda config --add channels usgs-astrogeology
-  - conda config --set ssl_verify false
-  - conda install -c conda-forge vlfeat
-  - conda install -c menpo cyvlfeat
-  - pip install pillow pysal
-  - conda install -c conda-forge scipy networkx numexpr dill cython pyyaml matplotlib runipy geopandas opencv numpy gdal
-  - conda install -c usgs-astrogeology plio
-
-  # Development installation
-  - conda install pytest pytest-cov coverage sh anaconda-client
-  - pip install coveralls
-
+  - conda config --add channels conda-forge
+  - conda env update -n test -f environment.yml
+  - export PROJ_LIB=$CONDA_PREFIX/share/proj  
 script:
   - pytest autocnet tests
 
@@ -60,7 +48,7 @@ after_success:
   - source deactivate
   - conda install conda-build anaconda-client
   - conda config --set anaconda_upload yes
-  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION recipe
+  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION -c conda-forge -c menpo -c usgs-astrogeology conda
 
 notifications:
   webhooks:
